@@ -13,7 +13,11 @@ observation likelihood p(x | z).
 
 # ----------------------------------------------------------------------
 
-## For data generation, need to specify a prior and a forward transformation model.
+## Configuration options
+
+For data generation, need to specify a prior and a forward transformation model.
+
+Below shows how to specify them in config.yaml
 
 ### Options for prior: gaussian, uniform. 
   prior:
