@@ -1,12 +1,100 @@
+# Fisher Information Estimation via Conditional Normalizing Flow
+
 Estimate the Fisher information matrix of a simulated forward model using a
 conditional invertible neural network (cINN) that approximates the
-observation likelihood p(x | z).
+observation likelihood p(x | z), and compare it against the closed-form
+analytic Fisher information for the chosen forward model.
 
-### Pipeline:
-    1. Generate synthetic (z, x) pairs from a prior and forward
-       model (data.py: SimulationData, priors, forward models).
-    2. Train a cINN approximating p(x | z) (train.Trainer), or load a
-       previously trained checkpoint, see ReadME.md and yaml config file.
-    3. Compare the Fisher information estimated from the flow's score
-       function (eval.FisherEstimator) against the analytic
-       Fisher information for the chosen forward model over a grid. 
+## Overview
+
+Given a simulator `x = mean(z) + noise`, where `mean` comes from a forward model and `noise ~ N(0, sigma)`, this project:
+
+1. Generates synthetic `(z, x)` pairs from a prior over `z` and
+   forward model (`data.py`).
+2. Trains a cINN (via [FrEIA](https://github.com/vislearn/FrEIA)) to
+   approximate `p(x | z)` (`train.py`), or loads a previously trained
+   checkpoint.
+3. Estimates the Fisher information `F(z) = E_{x~p(x|z)}[∇_z log p(x|z)
+   ∇_z log p(x|z)ᵀ]` from the trained flow's score function, over a z1-z2
+   grid (`eval.py`).
+4. Calculates the analytic Fisher information for the chosen forward model.
+
+`z` denotes the simulator parameter (the flow's conditioning variable);
+`x` denotes the noisy observation (the flow's modeled variable).
+
+## Project layout
+
+| File         | Purpose                                                             |
+|--------------|----------------------------------------------------------------------|
+| `main.py`    | Entry point: wires together data generation, training/loading, and evaluation. |
+| `config.py`  | Configuration schema (dataclasses) and YAML loader.                 |
+| `config.yaml`| Active experiment settings — edit this to change a run.             |
+| `data.py`    | Priors, forward models, `SimulationData`, analytic Fisher information. |
+| `cinn.py`    | `ConditionalInvertibleBlock` — the cINN architecture.    |
+| `train.py`   | `Trainer` — training loop |
+| `eval.py`    | `FisherEstimator` — Fisher information estimation.      |
+
+
+## Configuration
+
+All experiment settings live in `config.yaml`; see its comments and
+`config.py`'s dataclasses for the full schema. Key sections:
+
+- **`data`** — sample count, batch size, observation-noise covariance
+  (`sigma_diag` or a correlated `sigma_matrix`), and the `prior` /
+  `forward_model` to use (see registries below).
+- **`model`** — cINN architecture: block count, subnet width/depth,
+  activation (`relu`/`leakyrelu`/`elu`/`selu`/`gelu`), and coupling type
+  (`affine`/`spline`).
+- **`training`** — epochs, learning rate, optimizer/scheduler (any
+  `torch.optim` / `torch.optim.lr_scheduler` class name), warmup epochs
+  before checkpointing, TensorBoard logging, and the optional
+  `lambda_score` regularizer (see below).
+- **`evaluation`** — grid resolution, an optional fixed `grid_range`
+  (defaults to the observed range of the generated z data), and samples
+  per grid point for the Fisher information estimate.
+
+### Available priors (`data.PRIOR_REGISTRY`)
+
+- `gaussian` — `mu` + `std` (independent dims), or `mu` + `cov` (correlated).
+- `uniform` — `low` + `high`.
+
+### Available forward models (`data.FORWARD_MODEL_REGISTRY`)
+
+- `linear` — constant Jacobian; Fisher information is constant everywhere. 
+- `polynomial` — the original toy model.
+- `coupled_polynomial` — Fisher information with one minimum.
+- `spiral` — two-armed spiral.
+- `banana` — twisted-Gaussian coupling; z1-dependent off-diagonal Fisher term.
+- `tanh` — saturating, bounded Fisher information.
+
+### Score-penalty regularizer (`training.lambda_score`)
+
+When set, training loss becomes `NLL + lambda_score * mean(||∇_z log
+p(x|z)||²)`. This penalizes the same score function that
+`eval.FisherEstimator` differentiates, which can reduce noise in the
+downstream Fisher information estimate — at the cost of a second backward
+pass per training batch and a training-loss value that's no
+longer directly comparable across different `lambda_score` settings.
+Validation loss is always plain NLL for comparisons across runs. 
+
+## Outputs
+
+Each run writes to `output_dir` (or `../outputs/<SLURM_JOB_ID or "local">`
+if unset):
+
+- `z.npy`, `x.npy` — the generated synthetic dataset.
+- `fisher_grid_z1_axis.npy`, `fisher_grid_z2_axis.npy` — the grid axes used for both Fisher information evaluations.
+- `analytic_fisher_matrix_grid.npy`, `analytic_fisher_norm_grid.npy` — the closed-form Fisher information (full matrices, and Frobenius norm) over the grid.
+- `estimated_fisher_matrix_grid.npy`, `estimated_fisher_norm_grid.npy` — the flow-estimated counterparts.
+- `cinn_weights_ep<N>.pt` — model checkpoints saved on validation-loss improvement (after `warmup_epochs`).
+- `train_loss_history.npy`, `val_loss_history.npy` — per-epoch loss history.
+- `tensorboard/` — TensorBoard event files, if `training.tensorboard: true`.
+
+
+## Extending
+
+- **New prior or forward model**: subclass `Prior` / `ForwardModel` in
+  `data.py` and register it in `PRIOR_REGISTRY` / `FORWARD_MODEL_REGISTRY`;
+  it's then selectable from `config.yaml` via `data.prior.type` /
+  `data.forward_model.type`.
