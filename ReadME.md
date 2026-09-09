@@ -2,7 +2,7 @@ Estimate the Fisher information matrix of a simulated forward model using a
 conditional invertible neural network (cINN) that approximates the
 observation likelihood p(x | z).
 
-Pipeline:
+### Pipeline:
     1. Generate synthetic (z, x) pairs from a prior and forward
        model (data.py: SimulationData, priors, forward models).
     2. Train a cINN approximating p(x | z) (train.Trainer), or load a
@@ -11,12 +11,11 @@ Pipeline:
        function (eval.FisherEstimator) against the analytic
        Fisher information for the chosen forward model over a grid. 
 
+# ----------------------------------------------------------------------
 
-# ------------------------------------------------------------------------------------------
-# For data generation, need to specify a prior and a forward transformation model.
-# ------------------------------------------------------------------------------------------
+## For data generation, need to specify a prior and a forward transformation model.
 
-# Options for prior: gaussian, uniform. 
+### Options for prior: gaussian, uniform. 
   prior:
     type: uniform
     low: [-2.0, -2.0]
@@ -27,7 +26,7 @@ Pipeline:
     mu: [0.0, 0.0]
     std: [3.0, 3.0]
 
-# Options for forward_model: linear, polynomial, coupled_polynomial, spiral, banana, tanh
+### Options for forward_model: linear, polynomial, coupled_polynomial, spiral, banana, tanh
   forward_model:
     type: linear
     coupling: 0.7
