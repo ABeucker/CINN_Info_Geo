@@ -100,3 +100,13 @@ if unset):
   `data.py` and register it in `PRIOR_REGISTRY` / `FORWARD_MODEL_REGISTRY`;
   it's then selectable from `config.yaml` via `data.prior.type` /
   `data.forward_model.type`.
+
+## Example Results
+
+Some example results for a uniform prior and a coupled polynomial forward model.
+
+![Example results from one run](images/polynomial_batch_example.png)
+
+![Losses from a batch of runs](images/polynomial_batch_losses.png)
+
+![Averaged batch results](images/polynomial_batch_results.png)
