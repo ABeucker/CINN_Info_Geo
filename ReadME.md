@@ -107,7 +107,5 @@ Some example results for a uniform prior and a coupled polynomial forward model.
 
 ### Example results from one run:
 ![Example results from one run](images/polynomial_batch_example.png)
-### Losses from a batch of runs:
-![Losses from a batch of runs](images/polynomial_batch_losses.png)
 ### Averaged batch results:
 ![Averaged batch results](images/polynomial_batch_results.png)
