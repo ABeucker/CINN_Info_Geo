@@ -1,4 +1,0 @@
-Job start
-Running on node: gpu02
-srun: error: gpu02: task 0: Exited with exit code 1
-Job ended, Total runtime: 0 min 24 sec

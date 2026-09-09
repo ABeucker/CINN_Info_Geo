@@ -1,4 +1,0 @@
-Job start
-Running on node: gpu01
-srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
-slurmstepd-gpu01: error: *** JOB 33353 ON gpu01 CANCELLED AT 2026-09-09T11:02:18 ***
