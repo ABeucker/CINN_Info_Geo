@@ -1,0 +1,71 @@
+# Configuration file for running experiments. 
+
+seed: 42
+
+# Where to save outputs. If null, falls back to ../outputs/<SLURM_JOB_ID or "local">.
+output_dir: null
+
+# Guards against accidentally running the pipeline twice with one submission, since this was problem on HPC server. 
+# Was fixed with explicitly setting #SBATCH --ntasks=1 in SLURM script.
+use_run_lock: false
+
+# Data configuration.
+data:
+  n_samples: 25600
+  batch_size: 256
+
+  # Observation-noise covariance: 
+  # Can choose diagonal or full matrix, full matrix will override diagonal if both are set.
+  sigma_diag: [0.09, 0.25]  # format [0.09, 0.25]
+  sigma_matrix: null        # format [[0.09, 0.02], [0.02, 0.25]]
+
+  # Set prior distribution of latent variable z. See ReadME for options.
+  prior:
+    type: uniform
+    low: [-6.0, -1.0]
+    high: [2.0, 1.0]
+
+  # Set forward model for variable x. See ReadME for options.
+  forward_model:
+    type: coupled_polynomial
+
+# Standard invertible normalizing flow model configuration.
+model:
+  n_blocks: 8
+  n_nodes: 128
+  subnet_depth: 2
+  act: relu        # relu | leakyrelu | elu | selu | gelu
+  coupling: affine  # affine | spline
+
+# If below train_model is false, can set model location to a pretrained model to be used for evaluation here. Will be overridden if train_model is true.
+model_location: "../outputs/21916/cinn_best.pt"
+
+# Training configuration.
+training:
+  train_model: true
+  epochs: 100
+  lr: 0.001
+  weight_decay: 0.0
+  grad_clip: 5.0
+  warmup_epochs: 20
+
+  # Any class name in torch.optim / torch.optim.lr_scheduler.
+  optimizer: AdamW
+  optimizer_kwargs: {}
+
+  scheduler: ReduceLROnPlateau
+  scheduler_kwargs: {patience: 10, factor: 0.5}     
+
+  # Whether to log training progress to TensorBoard. In both cases logs also printed to stdout and saved to output_dir.
+  tensorboard: false
+  # Score-penalty regularizer weight (adds mean(||grad_z log p(x|z)||^2) to
+  # the NLL loss); null trains on plain NLL only.
+  lambda_score: 0.00005
+
+# Evaluation configuration. Described grid that is used to evaluvate the Fisher information matrix.
+evaluation:
+  grid_size: 100
+  # Fixed [min, max] axis range used for both z1 and z2; null derives the
+  # range from the generated z data instead.
+  grid_range: null
+  fisher_samples_per_point: 1000
