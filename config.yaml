@@ -19,13 +19,17 @@ data:
   sigma_diag: [0.09, 0.25]  # format [0.09, 0.25]
   sigma_matrix: null        # format [[0.09, 0.02], [0.02, 0.25]]
 
-  # Set prior distribution of latent variable z. See ReadME for options.
+  # Set prior distribution of latent variable z. Options are uniform and gaussian.
+  # Format: Set type to uniform or gaussian, and add any required parameters for the chosen prior type.
+  # See data.py for exact parameter requirements for each prior type.
   prior:
     type: uniform
     low: [-6.0, -1.0]
     high: [2.0, 1.0]
 
-  # Set forward model for variable x. See ReadME for options.
+  # Set forward model for variable x. 
+  # Format: Set type to linear, polynomial, coupled_polynomial, banana, spiral, tanh, and add any required parameters for the chosen forard model.
+  # See data.py for parameter requirements for each forward model type.
   forward_model:
     type: coupled_polynomial
 
