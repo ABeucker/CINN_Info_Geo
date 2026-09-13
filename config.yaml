@@ -1,15 +1,14 @@
-# Configuration file for running experiments. 
+# Experiment configuration for the Fisher-information / cINN pipeline.
 
-seed: 42
+seed: 45
 
 # Where to save outputs. If null, falls back to ../outputs/<SLURM_JOB_ID or "local">.
 output_dir: null
 
-# Guards against accidentally running the pipeline twice with one submission, since this was problem on HPC server. 
-# Was fixed with explicitly setting #SBATCH --ntasks=1 in SLURM script.
-use_run_lock: false
+# If below train_model is false, can set model location to a pretrained model to be used for evaluation here. Will be overridden if train_model is true.
+model_location: "../outputs/21916/cinn_best.pt"
 
-# Data configuration.
+# data configuration.
 data:
   n_samples: 25600
   batch_size: 256
@@ -41,9 +40,6 @@ model:
   act: relu        # relu | leakyrelu | elu | selu | gelu
   coupling: affine  # affine | spline
 
-# If below train_model is false, can set model location to a pretrained model to be used for evaluation here. Will be overridden if train_model is true.
-model_location: "../outputs/21916/cinn_best.pt"
-
 # Training configuration.
 training:
   train_model: true
@@ -64,7 +60,7 @@ training:
   tensorboard: false
   # Score-penalty regularizer weight (adds mean(||grad_z log p(x|z)||^2) to
   # the NLL loss); null trains on plain NLL only.
-  lambda_score: 0.00005
+  lambda_score: null
 
 # Evaluation configuration. Described grid that is used to evaluvate the Fisher information matrix.
 evaluation:

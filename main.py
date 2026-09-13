@@ -4,29 +4,31 @@ conditional invertible neural network (cINN) that approximates the
 observation likelihood p(x | z).
 
 Pipeline:
-    1. Generate synthetic (z, x) pairs from a prior and forward
+    1. Generate synthetic (z, x) pairs from a pluggable prior and forward
        model (data.py: SimulationData, priors, forward models).
     2. Train a cINN approximating p(x | z) (train.Trainer), or load a
-       previously trained checkpoint, see ReadME.md and yaml config file.
+       previously trained checkpoint -- see `training.train_model` in
+       config.yaml.
     3. Compare the Fisher information estimated from the flow's score
-       function (eval.FisherEstimator) against the analytic
-       Fisher information for the chosen forward model over a grid. Both
-       the full per-point matrix and its Frobenius norm are saved.
+       function (eval.FisherEstimator) against the closed-form analytic
+       Fisher information for the chosen forward model, over a z1-z2 grid
+       (data-driven by default, or fixed via `evaluation.grid_range`). Both
+       the full per-point matrix and its Frobenius norm are saved for each.
 
-All experiment settings live in config.yaml.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import logging
-import os
-from contextlib import contextmanager
+import re
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import torch
+import yaml
 
 from cinn import ConditionalInvertibleBlock
 from config import ExperimentConfig, load_config
@@ -36,56 +38,59 @@ from train import Trainer
 
 logger = logging.getLogger(__name__)
 
+_CHECKPOINT_RE = re.compile(r"cinn_weights_ep(\d+)\.pt$")
 
-def _acquire_run_lock(output_dir: Path) -> bool:
+
+def _find_last_checkpoint(output_dir: Path) -> Optional[Path]:
     """
-    Had a problem with two SLURM tasks launched for one job. This prevents this. 
-
-    However was fixed with explicitly setting #SBATCH --ntasks=1 in SLURM script.
+    The highest-numbered checkpoint saved during training, if any. Since
+    Trainer only ever writes a checkpoint on a validation-loss improvement,
+    this is also the best-performing one from the run, not merely the most
+    recently written. Returns None if training never improved past its
+    warmup period (see `training.warmup_epochs`).
     """
-    lock_path = output_dir / ".run.lock"
-    try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, f"pid={os.getpid()}\n".encode())
-        os.close(fd)
-        return True
-    except FileExistsError:
-        return False
+    candidates = []
+    for p in output_dir.glob("cinn_weights_ep*.pt"):
+        m = _CHECKPOINT_RE.search(p.name)
+        if m:
+            candidates.append((int(m.group(1)), p))
+    return max(candidates)[1] if candidates else None
 
 
-@contextmanager
-def run_lock(output_dir: Path, enabled: bool):
+def _epoch_from_path(path: str) -> Optional[int]:
+    """Extract the epoch number from a `cinn_weights_ep<N>.pt`-style path, if it matches; else None."""
+    m = _CHECKPOINT_RE.search(Path(path).name)
+    return int(m.group(1)) if m else None
+
+
+def _fisher_grid_name(kind: str, epoch: Optional[int]) -> str:
     """
-    Had a problem with two SLURM tasks launched for one job. This prevents this. 
-
-    However was fixed with explicitly setting #SBATCH --ntasks=1 in SLURM script.
+    `kind` is 'matrix' or 'norm'. Epoch-tagged (`estimated_fisher_matrix_
+    grid_ep<N>.npy`) whenever the evaluated checkpoint's epoch is known --
+    the same naming convention evaluate.py's cache looks for, so a
+    checkpoint you copy down locally and re-evaluate there is recognized
+    as already computed instead of silently redone under a different name.
+    Falls back to the plain (untagged) name only when no specific epoch
+    applies (e.g. no checkpoint was ever saved during training).
     """
-    if not enabled or _acquire_run_lock(output_dir):
-        try:
-            yield True
-        finally:
-            if enabled:
-                (output_dir / ".run.lock").unlink(missing_ok=True)
-    else:
-        yield False
+    suffix = f"_ep{epoch:04d}" if epoch is not None else ""
+    return f"estimated_fisher_{kind}_grid{suffix}.npy"
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
-    """--config and --no-lock, shared by main.py's and main_sweep.py's CLIs."""
+    """--config, shared by main.py's and main_sweep.py's CLIs."""
     parser.add_argument(
         "--config", default="config.yaml",
         help="Path to the YAML config file. Default: config.yaml.",
     )
-    parser.add_argument("--no-lock", action="store_true", help="Skip the run lock (useful for local testing).")
 
 
 def _format_config(cfg: ExperimentConfig) -> str:
-    """Read config and return a human-readable string for logging."""
+    """One line per top-level section -- readable without needing a full recursive pretty-printer."""
     return "\n".join([
         f"seed={cfg.seed}",
         f"output_dir={cfg.output_dir}",
         f"model_location={cfg.model_location}",
-        f"use_run_lock={cfg.use_run_lock}",
         f"data={cfg.data}",
         f"model={cfg.model}",
         f"training={cfg.training}",
@@ -93,41 +98,51 @@ def _format_config(cfg: ExperimentConfig) -> str:
     ])
 
 
+def _to_yaml_safe(obj):
+    """Recursively convert tuples to lists so yaml.safe_dump can represent the config (e.g. grid_range)."""
+    if isinstance(obj, dict):
+        return {k: _to_yaml_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_yaml_safe(v) for v in obj]
+    return obj
+
+
+def _save_run_config(cfg: ExperimentConfig, output_dir: Path) -> None:
+    """
+    Write the fully-resolved config to `output_dir/run_config.yaml`, purely
+    as a record of exactly what settings produced this run's outputs (for
+    your own future reference -- nothing else in this project reads it).
+    """
+    raw = _to_yaml_safe(dataclasses.asdict(cfg))
+    with open(output_dir / "run_config.yaml", "w") as f:
+        yaml.safe_dump(raw, f, sort_keys=False)
+
+
 def build_model(cfg: ExperimentConfig, data: SimulationData) -> ConditionalInvertibleBlock:
     """
-    Construct the cINN: initialized if about to be trained,
-    otherwise loaded from desired location. `n_dim`/`cond_dims` come from the data
+    Construct the cINN: freshly initialized if we're about to train it,
+    otherwise loaded from disk. `n_dim`/`cond_dims` come from the data
     itself, not config, so they always match the chosen prior/forward model.
     """
     params = cfg.model_params(load=not cfg.training.train_model, n_dim=data.x_dim, cond_dims=data.z_dim)
     return ConditionalInvertibleBlock(params)
 
 
-def main(config_path: str = "config.yaml", use_run_lock: Optional[bool] = None) -> None:
-    """`use_run_lock`, if given, overrides the config's `use_run_lock` (e.g. from --no-lock)."""
+def main(config_path: str = "config.yaml") -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
     cfg = load_config(config_path)
     logger.info("Using config (%s):\n%s", config_path, _format_config(cfg))
 
     output_dir = cfg.resolved_output_dir()
-    lock_enabled = cfg.use_run_lock if use_run_lock is None else use_run_lock
-
-    with run_lock(output_dir, lock_enabled) as acquired:
-        if not acquired:
-            logger.warning(
-                "Another process already holds the run lock for %s -- skipping this run to avoid "
-                "duplicate work (e.g. two tasks launched for one job). If a previous run crashed "
-                "without cleaning up, delete %s and re-run.",
-                output_dir, output_dir / ".run.lock",
-            )
-            return
-        _run(cfg, output_dir)
+    _run(cfg, output_dir)
 
 
 def _run(cfg: ExperimentConfig, output_dir: Path) -> None:
     def save(name: str, array: np.ndarray) -> None:
         np.save(output_dir / name, array)
+
+    _save_run_config(cfg, output_dir)
 
     rng = np.random.default_rng(cfg.seed)
     torch.manual_seed(cfg.seed)
@@ -148,6 +163,9 @@ def _run(cfg: ExperimentConfig, output_dir: Path) -> None:
 
     train_loader, val_loader, test_loader = data.dataloaders()
 
+    # Shared by both the analytic and the flow-estimated grid below, so they
+    # cover the same z1-z2 region and are directly comparable. Data-driven by
+    # default; fixed to evaluation.grid_range (same range on both axes) if set.
     if cfg.evaluation.grid_range is not None:
         axis = np.linspace(*cfg.evaluation.grid_range, cfg.evaluation.grid_size)
         z1_range, z2_range = axis, axis
@@ -186,9 +204,25 @@ def _run(cfg: ExperimentConfig, output_dir: Path) -> None:
             tensorboard=cfg.training.tensorboard,
             lambda_score=cfg.training.lambda_score,
         )
-        model = trainer.train()
+        trainer.train()  # mutates `model` in place; also writes checkpoints to output_dir
+
+        checkpoint_path = _find_last_checkpoint(output_dir)
+        if checkpoint_path is None:
+            logger.warning(
+                "No checkpoint was saved during training (epochs=%d, warmup_epochs=%d) -- "
+                "evaluating the final in-training weights instead of a reloaded checkpoint.",
+                cfg.training.epochs, cfg.training.warmup_epochs,
+            )
+            checkpoint_epoch = None
+        else:
+            checkpoint_epoch = _epoch_from_path(str(checkpoint_path))
+            logger.info("Evaluating last saved checkpoint: %s", checkpoint_path.name)
+            params = cfg.model_params(load=True, n_dim=data.x_dim, cond_dims=data.z_dim)
+            params["model_location"] = str(checkpoint_path)
+            model = ConditionalInvertibleBlock(params)
     else:
         logger.info("Loaded pre-trained cINN from %s", cfg.model_location)
+        checkpoint_epoch = _epoch_from_path(cfg.model_location)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     estimator = FisherEstimator(model=model, device=device, dataloader=test_loader)
@@ -201,8 +235,8 @@ def _run(cfg: ExperimentConfig, output_dir: Path) -> None:
         data, z1_range, z2_range, n_samples=cfg.evaluation.fisher_samples_per_point
     )
     estimated_norm_grid = np.linalg.norm(estimated_matrix_grid, axis=(-2, -1))
-    save("estimated_fisher_matrix_grid.npy", estimated_matrix_grid)
-    save("estimated_fisher_norm_grid.npy", estimated_norm_grid)
+    save(_fisher_grid_name("matrix", checkpoint_epoch), estimated_matrix_grid)
+    save(_fisher_grid_name("norm", checkpoint_epoch), estimated_norm_grid)
 
     logger.info("Done. Outputs written to %s", output_dir)
 
@@ -211,4 +245,4 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     add_common_args(parser)
     args = parser.parse_args()
-    main(args.config, use_run_lock=(False if args.no_lock else None))
+    main(args.config)
